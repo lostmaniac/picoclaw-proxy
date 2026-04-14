@@ -17,22 +17,28 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
           - goos: linux
             goarch: amd64
+            runner: ubuntu-latest
           - goos: linux
             goarch: arm64
+            runner: ubuntu-latest
           - goos: windows
             goarch: amd64
+            runner: ubuntu-latest
           - goos: windows
             goarch: arm64
+            runner: ubuntu-latest
           - goos: darwin
             goarch: amd64
+            runner: macos-latest
           - goos: darwin
             goarch: arm64
+            runner: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +58,10 @@ jobs:
           fi
           go build -ldflags="-s -w" -o ${BINARY} .
           echo "BINARY=${BINARY}" >> $GITHUB_ENV
+
+      - name: Codesign (macOS)
+        if: matrix.goos == 'darwin'
+        run: codesign --force --deep -s - ${{ env.BINARY }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -104,4 +114,39 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: Release ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
+          body: |
+            ## 安装
+
+            ### macOS
+            ```bash
+            # 下载对应架构的二进制
+            chmod +x picoclaw-proxy-darwin-arm64
+
+            # 如果提示"无法验证开发者"，执行:
+            xattr -cr picoclaw-proxy-darwin-arm64
+
+            ./picoclaw-proxy-darwin-arm64
+            ```
+
+            ### Linux
+            ```bash
+            chmod +x picoclaw-proxy-linux-amd64
+            ./picoclaw-proxy-linux-amd64
+            ```
+
+            ### Windows
+            直接运行 `picoclaw-proxy-windows-amd64.exe`
+
+            ## 用法
+
+            ```bash
+            # 默认配置 (允许 10.88.7.0/24)
+            ./picoclaw-proxy
+
+            # 自定义网段
+            ./picoclaw-proxy -allow "10.88.7.0/24,192.168.1.0/24"
+
+            # 自定义 CDP 地址和端口
+            ./picoclaw-proxy -cdp 127.0.0.1:9333 -port 9333
+            ```
           files: release-assets/*
