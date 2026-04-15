@@ -59,47 +59,26 @@ jobs:
           go build -ldflags="-s -w" -o ${BINARY} .
           echo "BINARY=${BINARY}" >> $GITHUB_ENV
 
-      - name: Package macOS
+      - name: Codesign (macOS)
         if: matrix.goos == 'darwin'
+        run: codesign --force --deep -s - ${{ env.BINARY }}
+
+      - name: Package
         run: |
-          # ad-hoc codesign
-          codesign --force --deep -s - ${{ env.BINARY }}
-
-          # 创建双击可启动的 .command 文件
-          cat > "启动 CDP 代理.command" << 'LAUNCHER'
-          #!/bin/bash
-          cd "$(dirname "$0")"
-          BINARY=$(ls picoclaw-proxy-darwin-* 2>/dev/null | head -1)
-          if [ -z "$BINARY" ]; then
-            echo "[!] 未找到 picoclaw-proxy 二进制文件"
-            echo "    请确保本文件与 picoclaw-proxy-darwin-* 在同一目录"
-            read -p "按回车键退出..."
-            exit 1
+          # 统一命名: picoclaw-proxy-{os}-{arch}.zip
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            OS_NAME=macos
+          else
+            OS_NAME=${{ matrix.goos }}
           fi
-          chmod +x "$BINARY"
-          xattr -cr "$BINARY" 2>/dev/null
-          exec "./$BINARY"
-          LAUNCHER
-          chmod +x "启动 CDP 代理.command"
+          ZIP_NAME="picoclaw-proxy-${OS_NAME}-${{ matrix.goarch }}.zip"
+          zip -j "$ZIP_NAME" "${{ env.BINARY }}"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
 
-          # 打 zip 包 (保留可执行权限)
-          zip -r "picoclaw-proxy-darwin-${{ matrix.goarch }}.zip" \
-            "${{ env.BINARY }}" "启动 CDP 代理.command"
-
-      - name: Upload macOS artifact
-        if: matrix.goos == 'darwin'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: picoclaw-proxy-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: picoclaw-proxy-darwin-${{ matrix.goarch }}.zip
-          retention-days: 5
-
-      - name: Upload other artifact
-        if: matrix.goos != 'darwin'
-        uses: actions/upload-artifact@v4
-        with:
-          name: picoclaw-proxy-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: ${{ env.BINARY }}
+          path: ${{ env.ZIP_NAME }}
           retention-days: 5
 
   release:
@@ -120,19 +99,9 @@ jobs:
           set -e
           mkdir -p release-assets
           for dir in artifacts/*/; do
-            name=$(basename "$dir")
-            # macOS zip
             for zf in "$dir"/*.zip; do
               [ -f "$zf" ] && cp "$zf" release-assets/
             done
-            # Windows exe
-            if [ -f "$dir/picoclaw-proxy.exe" ]; then
-              cp "$dir/picoclaw-proxy.exe" "release-assets/${name}.exe"
-            fi
-            # Linux raw binary
-            if [ -f "$dir/picoclaw-proxy" ]; then
-              cp "$dir/picoclaw-proxy" "release-assets/${name}"
-            fi
           done
           echo "--- Release assets ---"
           ls -lh release-assets/
@@ -157,27 +126,25 @@ jobs:
           body: |
             ## 安装
 
-            ### macOS (双击启动)
-            1. 下载 `picoclaw-proxy-darwin-arm64.zip` (Apple Silicon) 或 `picoclaw-proxy-darwin-amd64.zip` (Intel)
-            2. 解压 zip
-            3. 双击 **启动 CDP 代理.command** 即可运行
-            4. 如提示"无法验证开发者"，右键点击 → 打开 → 打开
+            所有平台均下载 zip 包，解压后使用。
 
-            ### macOS (命令行)
+            ### macOS
             ```bash
-            chmod +x picoclaw-proxy-darwin-arm64
-            xattr -cr picoclaw-proxy-darwin-arm64
-            ./picoclaw-proxy-darwin-arm64
+            unzip picoclaw-proxy-macos-arm64.zip
+            chmod +x picoclaw-proxy
+            xattr -cr picoclaw-proxy
+            ./picoclaw-proxy
             ```
 
             ### Linux
             ```bash
-            chmod +x picoclaw-proxy-linux-amd64
-            ./picoclaw-proxy-linux-amd64
+            unzip picoclaw-proxy-linux-amd64.zip
+            chmod +x picoclaw-proxy
+            ./picoclaw-proxy
             ```
 
             ### Windows
-            直接运行 `picoclaw-proxy-windows-amd64.exe`
+            解压 `picoclaw-proxy-windows-amd64.zip`，运行 `picoclaw-proxy.exe`
 
             ## 用法
 
