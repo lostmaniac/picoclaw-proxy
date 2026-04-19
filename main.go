@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -17,7 +18,7 @@ import (
 	"time"
 )
 
-const version = "1.5.0"
+const version = "1.6.0"
 
 var (
 	activeConns int64
@@ -52,19 +53,22 @@ func main() {
 	}
 	fmt.Printf("[✓] 检测到 %d 个外部网络接口\n", len(extIPs))
 
-	// 3. 启动代理
+	// 3. 检查代理端口占用
+	checkAndFreePort(*proxyPort)
+
+	// 4. 启动代理
 	listeners, actualPort := startProxy(*cdpAddr, *proxyPort, extIPs, allowedNets)
 	if len(listeners) == 0 {
 		log.Fatal("[✗] 无法启动代理")
 	}
 
-	// 4. 显示连接信息与 PicoClaw 提示词
+	// 5. 显示连接信息
 	showConnectionInfo(extIPs, actualPort, *allowStr)
 
-	// 5. 自检
+	// 6. 自检
 	selfTest(extIPs, actualPort)
 
-	// 6. 等待退出
+	// 7. 等待退出
 	waitShutdown(listeners, chromeProc)
 }
 
@@ -183,9 +187,9 @@ func findChrome() string {
 	return ""
 }
 
-func getUserDataDir(port string) string {
+func getUserDataDir() string {
 	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".picoclaw-browser-proxy", "chrome_mcp_data_"+port)
+	dir := filepath.Join(home, ".picoclaw-browser-proxy")
 	os.MkdirAll(dir, 0700)
 	return dir
 }
@@ -206,7 +210,7 @@ func launchChrome(cdpAddr string) *os.Process {
 	}
 
 	port := extractPort(cdpAddr)
-	userDataDir := getUserDataDir(port)
+	userDataDir := getUserDataDir()
 
 	args := []string{
 		"--remote-debugging-port=" + port,
@@ -235,6 +239,130 @@ func killChrome(proc *os.Process) {
 		proc.Wait()
 	}
 	fmt.Println("[✓] 浏览器进程已终止")
+}
+
+// ---------------------------------------------------------------------------
+// 端口占用检查
+// ---------------------------------------------------------------------------
+
+func checkAndFreePort(port int) {
+	addr := fmt.Sprintf(":%d", port)
+	ln, err := net.Listen("tcp", addr)
+	if err == nil {
+		ln.Close()
+		return
+	}
+
+	procName := getPortProcess(port)
+	fmt.Printf("[!] 端口 %d 已被占用", port)
+	if procName != "" {
+		fmt.Printf(" (%s)", procName)
+	}
+	fmt.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("  是否结束该进程？(y/n): ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "y" || input == "yes" {
+			killPortProcess(port)
+			time.Sleep(1 * time.Second)
+			ln2, err2 := net.Listen("tcp", addr)
+			if err2 != nil {
+				log.Fatalf("[✗] 结束进程后端口仍被占用: %v", err2)
+			}
+			ln2.Close()
+			fmt.Printf("[✓] 端口 %d 已释放\n", port)
+			return
+		}
+		if input == "n" || input == "no" {
+			log.Fatal("[✗] 端口被占用，退出")
+		}
+	}
+}
+
+func getPortProcess(port int) string {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c",
+			fmt.Sprintf("netstat -aon | findstr :%d | findstr LISTENING", port))
+	case "darwin":
+		cmd = exec.Command("lsof", "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-t")
+	default:
+		cmd = exec.Command("ss", "-tlnp", fmt.Sprintf("sport = :%d", port))
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil || len(out) == 0 {
+		return ""
+	}
+
+	if runtime.GOOS == "windows" {
+		fields := strings.Fields(strings.TrimSpace(string(out)))
+		if len(fields) >= 5 {
+			pid := fields[len(fields)-1]
+			nameOut, _ := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %s", pid), "/FO", "CSV", "/NH").Output()
+			parts := strings.Split(string(nameOut), ",")
+			if len(parts) >= 1 {
+				return strings.Trim(parts[0], "\"") + " (PID " + pid + ")"
+			}
+		}
+		return string(out)
+	}
+
+	if runtime.GOOS == "darwin" {
+		pid := strings.TrimSpace(string(out))
+		lines := strings.Split(pid, "\n")
+		if len(lines) > 0 {
+			pid = strings.TrimSpace(lines[0])
+		}
+		nameOut, _ := exec.Command("ps", "-p", pid, "-o", "comm=").Output()
+		name := strings.TrimSpace(string(nameOut))
+		if name != "" {
+			return name + " (PID " + pid + ")"
+		}
+		return "PID " + pid
+	}
+
+	// Linux: ss output
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if idx := strings.Index(line, "users:((\""); idx != -1 {
+			part := line[idx+9:]
+			if end := strings.Index(part, "\""); end > 0 {
+				name := part[:end]
+				if pidx := strings.Index(part, "pid="); pidx > 0 {
+					pidEnd := strings.Index(part[pidx:], ",")
+					if pidEnd < 0 {
+						pidEnd = strings.Index(part[pidx:], ")")
+					}
+					if pidEnd > 0 {
+						pid := part[pidx+4 : pidx+pidEnd]
+						return name + " (PID " + pid + ")"
+					}
+				}
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func killPortProcess(port int) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c",
+			fmt.Sprintf("for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :%d ^| findstr LISTENING') do taskkill /F /PID %%a", port))
+	case "darwin":
+		cmd = exec.Command("bash", "-c",
+			fmt.Sprintf("lsof -i :%d -sTCP:LISTEN -t | xargs kill -9", port))
+	default:
+		cmd = exec.Command("bash", "-c",
+			fmt.Sprintf("ss -tlnp 'sport = :%d' | grep -oP 'pid=\\K[0-9]+' | xargs kill -9", port))
+	}
+	cmd.Run()
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +553,25 @@ func handleConnection(conn net.Conn, cdpAddr string, allowed []*net.IPNet) {
 }
 
 func isAllowedIP(ip net.IP, nets []*net.IPNet) bool {
+	if ip.IsLoopback() {
+		return true
+	}
+	ifaces, _ := net.Interfaces()
+	for _, iface := range ifaces {
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			var localIP net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				localIP = v.IP
+			case *net.IPAddr:
+				localIP = v.IP
+			}
+			if localIP != nil && localIP.Equal(ip) {
+				return true
+			}
+		}
+	}
 	for _, n := range nets {
 		if n.Contains(ip) {
 			return true
@@ -474,21 +621,10 @@ func showConnectionInfo(ips []net.IP, port int, allowStr string) {
 
 	ip := ips[0]
 
-	fmt.Println("  ── PicoClaw 提示词 (复制下方内容发给 PicoClaw) ──")
+	fmt.Println("  ── MCP 服务器配置 ──")
 	fmt.Println()
-
-	fmt.Printf(`请将以下规则写入你的记忆系统并永久遵守:
-
-【浏览器远程调试规则】
-1. 以后所有浏览器操作必须使用远程调试方式，不可在本地打开浏览器
-2. PicoClaw 环境没有安装浏览器，只能通过远程调试操作用户的浏览器
-3. 每次需要访问网页、搜索、填表等操作都必须使用远程调试
-4. 远程调试地址: %s:%d
-5. 首次连接时浏览器可能会弹出最多 3 次"允许远程调试"的提示，用户需全部点击允许
-
-写入记忆后，请通过 CDP 远程调试连接我的浏览器 (地址: %s:%d)，
-连接成功后请打开百度 https://www.baidu.com 进行测试。
-`, ip, port, ip, port)
+	fmt.Printf("  请将 PicoClaw 的 MCP 服务器地址配置为:\n")
+	fmt.Printf("  http://%s:%d\n", ip, port)
 
 	fmt.Println()
 	fmt.Println("  ═════════════════════════════════════════════════")
