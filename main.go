@@ -7,7 +7,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -15,7 +17,7 @@ import (
 	"time"
 )
 
-const version = "1.3.0"
+const version = "1.5.0"
 
 var (
 	activeConns int64
@@ -31,13 +33,13 @@ func main() {
 	allowedNets := parseAllowedNets(*allowStr)
 	printBanner()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		fmt.Println("\n\n  收到退出信号，正在关闭...")
-		os.Exit(0)
-	}()
+	// 0. 自动启动浏览器
+	var chromeProc *os.Process
+	fmt.Println("[*] 正在搜索浏览器...")
+	chromeProc = launchChrome(*cdpAddr)
+	if chromeProc == nil {
+		showCDPInstructions()
+	}
 
 	// 1. 等待浏览器调试端口
 	fmt.Println("[*] 正在检查调试端口...")
@@ -63,7 +65,7 @@ func main() {
 	selfTest(extIPs, actualPort)
 
 	// 6. 等待退出
-	waitShutdown(listeners)
+	waitShutdown(listeners, chromeProc)
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +107,134 @@ func printBanner() {
 	fmt.Println()
 	fmt.Printf("  平台: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	fmt.Println()
+}
+
+// ---------------------------------------------------------------------------
+// Chrome 自动启动
+// ---------------------------------------------------------------------------
+
+func findChrome() string {
+	var candidates []string
+
+	switch runtime.GOOS {
+	case "windows":
+		localAppData := os.Getenv("LOCALAPPDATA")
+		candidates = []string{
+			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		}
+		if localAppData != "" {
+			candidates = append(candidates,
+				localAppData+`\Google\Chrome\Application\chrome.exe`,
+			)
+		}
+		candidates = append(candidates,
+			`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+			`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+		)
+		if localAppData != "" {
+			candidates = append(candidates,
+				localAppData+`\Microsoft\Edge\Application\msedge.exe`,
+			)
+		}
+
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		candidates = []string{
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		}
+		if home != "" {
+			candidates = append(candidates,
+				filepath.Join(home, "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+			)
+		}
+		candidates = append(candidates,
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+		)
+
+	default:
+		candidates = []string{
+			"google-chrome",
+			"google-chrome-stable",
+			"chromium",
+			"chromium-browser",
+			"/usr/bin/google-chrome",
+			"/usr/bin/google-chrome-stable",
+			"/usr/bin/chromium",
+			"/usr/bin/chromium-browser",
+			"/snap/bin/chromium",
+			"/usr/local/bin/chrome",
+			"/usr/local/bin/chromium",
+		}
+	}
+
+	for _, c := range candidates {
+		if runtime.GOOS == "linux" && !strings.Contains(c, "/") {
+			if p, err := exec.LookPath(c); err == nil {
+				return p
+			}
+		} else {
+			if _, err := os.Stat(c); err == nil {
+				return c
+			}
+		}
+	}
+	return ""
+}
+
+func getUserDataDir(port string) string {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".picoclaw-browser-proxy", "chrome_mcp_data_"+port)
+	os.MkdirAll(dir, 0700)
+	return dir
+}
+
+func extractPort(addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "9222"
+	}
+	return port
+}
+
+func launchChrome(cdpAddr string) *os.Process {
+	chromePath := findChrome()
+	if chromePath == "" {
+		fmt.Println("[✗] 未找到 Chrome 或 Edge 浏览器")
+		return nil
+	}
+
+	port := extractPort(cdpAddr)
+	userDataDir := getUserDataDir(port)
+
+	args := []string{
+		"--remote-debugging-port=" + port,
+		"--user-data-dir=" + userDataDir,
+		"--no-first-run",
+	}
+
+	cmd := exec.Command(chromePath, args...)
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("[✗] 启动浏览器失败: %v\n", err)
+		return nil
+	}
+
+	fmt.Printf("[✓] 已启动浏览器 (PID: %d): %s\n", cmd.Process.Pid, chromePath)
+	return cmd.Process
+}
+
+func killChrome(proc *os.Process) {
+	if proc == nil {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		exec.Command("taskkill", "/T", "/F", "/PID", fmt.Sprintf("%d", proc.Pid)).Run()
+	} else {
+		proc.Signal(syscall.SIGTERM)
+		proc.Wait()
+	}
+	fmt.Println("[✓] 浏览器进程已终止")
 }
 
 // ---------------------------------------------------------------------------
@@ -153,11 +283,11 @@ func showCDPInstructions() {
 
 	switch runtime.GOOS {
 	case "windows":
-		fmt.Println(`    "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222`)
+		fmt.Println(`    "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="%USERPROFILE%\.picoclaw-browser-proxy\chrome_mcp_data"`)
 	case "darwin":
-		fmt.Println(`    /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222`)
+		fmt.Println(`    /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir=$HOME/.picoclaw-browser-proxy/chrome_mcp_data`)
 	default:
-		fmt.Println("    google-chrome --remote-debugging-port=9222")
+		fmt.Println("    google-chrome --remote-debugging-port=9222 --user-data-dir=$HOME/.picoclaw-browser-proxy/chrome_mcp_data")
 	}
 
 	fmt.Println()
@@ -371,7 +501,7 @@ func showConnectionInfo(ips []net.IP, port int, allowStr string) {
 // 优雅退出
 // ---------------------------------------------------------------------------
 
-func waitShutdown(listeners []net.Listener) {
+func waitShutdown(listeners []net.Listener, chromeProc *os.Process) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	s := <-sigCh
@@ -379,5 +509,6 @@ func waitShutdown(listeners []net.Listener) {
 	for _, ln := range listeners {
 		ln.Close()
 	}
+	killChrome(chromeProc)
 	fmt.Println("  [✓] 已停止")
 }
