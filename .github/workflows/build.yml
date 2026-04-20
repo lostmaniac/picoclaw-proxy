@@ -44,7 +44,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.23"
 
       - name: Build
         env:
@@ -146,16 +146,27 @@ jobs:
             ### Windows
             解压 `picoclaw-proxy-windows-amd64.zip`，运行 `picoclaw-proxy.exe`
 
+            ## 配置
+
+            在当前目录创建 `picoclaw_proxy_config.yaml`：
+
+            ```yaml
+            host: 10.88.7.15
+            port: 22001
+            user: root
+            private_key: |
+              -----BEGIN OPENSSH PRIVATE KEY-----
+              ...
+              -----END OPENSSH PRIVATE KEY-----
+            ```
+
             ## 用法
 
             ```bash
-            # 默认配置 (允许 10.88.7.0/24)
+            # 自动查找 picoclaw_proxy_config.yaml / config.yaml / *.yaml
             ./picoclaw-proxy
 
-            # 自定义网段
-            ./picoclaw-proxy -allow "10.88.7.0/24,192.168.1.0/24"
-
-            # 自定义 CDP 地址和端口
-            ./picoclaw-proxy -cdp 127.0.0.1:9333 -port 9333
+            # 指定配置文件
+            ./picoclaw-proxy -config /path/to/config.yaml
             ```
           files: release-assets/*

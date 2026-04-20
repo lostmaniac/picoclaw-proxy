@@ -1,3 +1,4 @@
 picoclaw-proxy
 *.exe
 *.log
+*.yaml
