@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -70,13 +71,13 @@ func main() {
 
 	cfgPath, err := findConfig(*configPath)
 	if err != nil {
-		log.Fatalf("[✗] %v", err)
+		fatal("%v", err)
 	}
 	fmt.Printf("[✓] 配置文件: %s\n", cfgPath)
 
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
-		log.Fatalf("[✗] %v", err)
+		fatal("%v", err)
 	}
 
 	fmt.Printf("[*] 目标: %s@%s:%d\n", cfg.User, cfg.Host, cfg.Port)
@@ -87,9 +88,9 @@ func main() {
 	if err != nil {
 		procInfo := findPortProcess(cfg.LocalPort)
 		if procInfo != "" {
-			log.Fatalf("[✗] 端口 %d 已被占用: %s", cfg.LocalPort, procInfo)
+			fatal("端口 %d 已被占用: %s", cfg.LocalPort, procInfo)
 		}
-		log.Fatalf("[✗] 本地监听失败: %v", err)
+		fatal("本地监听失败: %v", err)
 	}
 	defer listener.Close()
 	fmt.Printf("[✓] 本地监听: %s\n", localListen)
@@ -152,6 +153,8 @@ func main() {
 			log.Println("[✓] SSH 重连成功")
 		}
 
+		go checkRemotePort(client, cfg)
+
 		clientDone := make(chan struct{})
 		go func() {
 			keepaliveLoop(client)
@@ -209,13 +212,29 @@ func keepaliveLoop(client *ssh.Client) {
 	}
 }
 
+func checkRemotePort(client *ssh.Client, cfg *Config) {
+	remoteAddr := fmt.Sprintf("%s:%d", cfg.RemoteAddr, cfg.RemotePort)
+	conn, err := client.Dial("tcp", remoteAddr)
+	if err != nil {
+		fmt.Printf("[!] 远程 %s 未就绪，请确认远程浏览器已开启调试端口\n", remoteAddr)
+		fmt.Println("[*] 连接进来时会自动重试转发")
+		return
+	}
+	conn.Close()
+	fmt.Printf("[✓] 远程 %s 已就绪\n", remoteAddr)
+}
+
 func handleForward(localConn net.Conn, client *ssh.Client, cfg *Config) {
 	defer localConn.Close()
 
 	remoteAddr := fmt.Sprintf("%s:%d", cfg.RemoteAddr, cfg.RemotePort)
 	sshConn, err := client.Dial("tcp", remoteAddr)
 	if err != nil {
-		log.Printf("[!] 远程连接失败: %v", err)
+		if strings.Contains(err.Error(), "Connection refused") {
+			log.Printf("[!] 远程浏览器未启动 (远程 %s:%d 未监听)", cfg.RemoteAddr, cfg.RemotePort)
+		} else {
+			log.Printf("[!] 远程连接失败: %v", err)
+		}
 		return
 	}
 	defer sshConn.Close()
@@ -281,6 +300,13 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("配置缺少 host 字段")
 	}
 	return &cfg, nil
+}
+
+func fatal(format string, args ...interface{}) {
+	fmt.Printf("[✗] "+format+"\n", args...)
+	fmt.Println("\n按 Enter 键退出...")
+	bufio.NewReader(os.Stdin).ReadString('\n')
+	os.Exit(1)
 }
 
 func printBanner() {
